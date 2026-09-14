@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import uuid
 import io
+import os
+import json
 import hashlib
 import time
 try:
@@ -50,19 +52,27 @@ if MODO_ADMIN_URL:
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 3. CONEXÃO COM O BANCO DE DADOS
+# 3. CONEXÃO COM O BANCO DE DADOS (resiliente)
 # ==========================================
-@st.cache_resource
-def init_connection():
-    try:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key)
-    except Exception as e:
-        st.error("Erro nos Secrets do Streamlit. Verifique a configuração.")
-        return None
+# No plano gratuito, o projeto Supabase entra em repouso depois de alguns dias
+# sem uso e leva de 1 a 2 minutos para acordar. Enquanto isso, toda chamada
+# falha. Por isso a conexão NÃO guarda a falha em cache: se der erro agora,
+# a próxima execução tenta novamente assim que o banco voltar.
 
-supabase = init_connection()
+@st.cache_resource(show_spinner=False)
+def init_connection() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+try:
+    supabase = init_connection()
+except KeyError:
+    supabase = None
+    st.error("⚠️ Secrets ausentes: configure SUPABASE_URL e SUPABASE_KEY.")
+except Exception:
+    # Falha de rede/banco em repouso: não cacheia, tenta de novo no próximo ciclo.
+    supabase = None
 
 # ==========================================
 # 4. CONSTANTES
@@ -71,6 +81,13 @@ TIMEOUT_MINUTOS = 2          # Sessão expira após 2 min de inatividade
 AVISO_TIMEOUT_SEG = 30       # Aviso visual nos últimos 30 segundos
 MAX_TENTATIVAS_SENHA = 5     # Bloqueia após 5 erros de senha
 DATA_CORTE_FALLBACK = datetime(2025, 12, 31)  # Fallback texto puro encerra nesta data
+
+# --- Resiliência a banco em repouso / queda de rede ---
+TENTATIVAS_REDE = 4          # Tentativas por operação antes de desistir
+ESPERA_INICIAL_SEG = 1.5     # Backoff: 1.5s, 3s, 6s (total ~10s)
+DIR_LOCAL = os.environ.get("REFEITORIO_DIR_LOCAL", ".dados_locais")
+ARQ_FILA = os.path.join(DIR_LOCAL, "registros_pendentes.json")
+ARQ_SNAPSHOT = os.path.join(DIR_LOCAL, "colaboradores_snapshot.json")
 
 # ==========================================
 # 5. FUNÇÕES DE SEGURANÇA
@@ -125,27 +142,213 @@ def resetar_sessao():
     st.session_state.pop("ultimo_ativo", None)
 
 # ==========================================
+# 6.5 RESILIÊNCIA: RETRY, FILA LOCAL E SNAPSHOT
+# ==========================================
+# Regra de ouro: nenhum registro feito pelo colaborador pode ser perdido
+# porque o Supabase estava dormindo. Se o banco não responder, o registro
+# é gravado em fila local e reenviado automaticamente quando o banco voltar.
+
+def _garantir_dir_local():
+    try:
+        os.makedirs(DIR_LOCAL, exist_ok=True)
+        return True
+    except Exception:
+        return False
+
+
+def _ler_json(caminho, padrao):
+    try:
+        with open(caminho, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return padrao
+
+
+def _gravar_json(caminho, dados) -> bool:
+    if not _garantir_dir_local():
+        return False
+    try:
+        temporario = caminho + ".tmp"
+        with open(temporario, "w", encoding="utf-8") as f:
+            json.dump(dados, f, ensure_ascii=False, indent=2)
+        os.replace(temporario, caminho)
+        return True
+    except Exception:
+        return False
+
+
+def executar_com_retry(operacao, tentativas: int = TENTATIVAS_REDE):
+    """Executa a operação repetindo com espera crescente.
+
+    Cobre o 'cold start' do Supabase: a primeira chamada acorda o projeto e
+    as seguintes costumam funcionar.
+    """
+    if supabase is None:
+        raise RuntimeError("Conexão com o banco indisponível.")
+    ultimo_erro = None
+    for tentativa in range(tentativas):
+        try:
+            return operacao()
+        except Exception as erro:
+            ultimo_erro = erro
+            if tentativa < tentativas - 1:
+                time.sleep(ESPERA_INICIAL_SEG * (2 ** tentativa))
+    raise ultimo_erro
+
+
+def banco_disponivel() -> bool:
+    """Ping leve no banco (também serve para acordar o projeto)."""
+    if supabase is None:
+        return False
+    try:
+        supabase.table("colaboradores").select("nome").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+# --- Fila local de registros pendentes ---
+
+def carregar_fila() -> list:
+    fila = _ler_json(ARQ_FILA, [])
+    return fila if isinstance(fila, list) else []
+
+
+def salvar_fila(fila: list) -> bool:
+    return _gravar_json(ARQ_FILA, fila)
+
+
+def enfileirar_lote(linhas: list, cod: str) -> bool:
+    """Guarda o lote em disco para envio posterior. Retorna False se nem o
+    disco aceitou a gravação (aí o lote fica só na sessão, como último recurso)."""
+    fila = carregar_fila()
+    fila.append({
+        "codigo_auditoria": cod,
+        "criado_em": datetime.now().isoformat(timespec="seconds"),
+        "linhas": linhas,
+    })
+    gravou = salvar_fila(fila)
+    # Espelho em memória: sobrevive a falha de disco enquanto o app estiver de pé.
+    pendentes_sessao = st.session_state.get("fila_memoria", [])
+    pendentes_sessao.append({"codigo_auditoria": cod, "linhas": linhas})
+    st.session_state["fila_memoria"] = pendentes_sessao
+    return gravou
+
+
+def _lote_ja_gravado(cod: str) -> bool:
+    """Evita duplicar se o insert chegou ao banco mas a resposta se perdeu."""
+    try:
+        res = executar_com_retry(
+            lambda: supabase.table("registros")
+            .select("id")
+            .eq("codigo_auditoria", cod)
+            .limit(1)
+            .execute(),
+            tentativas=2,
+        )
+        return bool(res.data)
+    except Exception:
+        return False
+
+
+def reenviar_pendentes() -> tuple:
+    """Tenta subir tudo que está na fila. Retorna (enviados, restantes)."""
+    fila = carregar_fila()
+    memoria = st.session_state.get("fila_memoria", [])
+    codigos_em_disco = {lote.get("codigo_auditoria") for lote in fila}
+    for lote in memoria:
+        if lote.get("codigo_auditoria") not in codigos_em_disco:
+            fila.append(lote)
+
+    if not fila or supabase is None:
+        return 0, len(fila)
+
+    enviados = 0
+    restantes = []
+    for lote in fila:
+        cod = lote.get("codigo_auditoria")
+        linhas = lote.get("linhas") or []
+        if not linhas:
+            continue
+        try:
+            if _lote_ja_gravado(cod):
+                enviados += 1
+                continue
+            executar_com_retry(
+                lambda linhas=linhas: supabase.table("registros").insert(linhas).execute(),
+                tentativas=2,
+            )
+            enviados += 1
+        except Exception:
+            restantes.append(lote)
+
+    salvar_fila(restantes)
+    st.session_state["fila_memoria"] = list(restantes)
+    return enviados, len(restantes)
+
+
+def total_pendentes() -> int:
+    fila = carregar_fila()
+    codigos = {lote.get("codigo_auditoria") for lote in fila}
+    for lote in st.session_state.get("fila_memoria", []):
+        codigos.add(lote.get("codigo_auditoria"))
+    return len(codigos)
+
+
+# --- Snapshot de colaboradores (permite operar com o banco fora do ar) ---
+
+def salvar_snapshot_colaboradores(dados: list):
+    if dados:
+        _gravar_json(ARQ_SNAPSHOT, {
+            "atualizado_em": datetime.now().isoformat(timespec="seconds"),
+            "colaboradores": dados,
+        })
+
+
+def carregar_snapshot_colaboradores() -> list:
+    dados = _ler_json(ARQ_SNAPSHOT, {})
+    if isinstance(dados, dict):
+        return dados.get("colaboradores") or []
+    return []
+
+
+# ==========================================
 # 7. FUNÇÕES DE DADOS
 # ==========================================
 
-@st.cache_data(ttl=60)
-def buscar_dados_colaboradores():
-    """Busca colaboradores com cache de 60 segundos."""
-    try:
-        res = supabase.table("colaboradores").select("nome, senha, ativo").execute()
-        # Exibe apenas colaboradores ativos (campo 'ativo' = True ou ausente)
-        return [u for u in res.data if u.get("ativo", True) is not False]
-    except:
-        return []
+@st.cache_data(ttl=60, show_spinner=False)
+def _buscar_colaboradores_online() -> list:
+    """Busca no banco com retry. Levanta exceção se o banco não responder —
+    exceção não é cacheada, então a próxima execução tenta de novo."""
+    res = executar_com_retry(
+        lambda: supabase.table("colaboradores").select("nome, senha, ativo").execute()
+    )
+    return res.data or []
 
-@st.cache_data(ttl=60)
+
+def buscar_dados_colaboradores():
+    """Colaboradores ativos. Se o banco estiver em repouso, usa o último
+    snapshot salvo em disco para o totem continuar funcionando."""
+    try:
+        dados = _buscar_colaboradores_online()
+        salvar_snapshot_colaboradores(dados)
+        st.session_state["banco_online"] = True
+    except Exception:
+        st.session_state["banco_online"] = False
+        dados = carregar_snapshot_colaboradores()
+    return [u for u in dados if u.get("ativo", True) is not False]
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def buscar_todos_colaboradores():
     """Busca todos os colaboradores (incluindo inativos) para o admin."""
     try:
-        res = supabase.table("colaboradores").select("*").execute()
-        return res.data
-    except:
-        return []
+        res = executar_com_retry(
+            lambda: supabase.table("colaboradores").select("*").execute()
+        )
+        return res.data or []
+    except Exception:
+        return carregar_snapshot_colaboradores()
 
 def hora_local() -> datetime:
     """Retorna hora atual no fuso de Mato Grosso (America/Cuiaba)."""
@@ -169,39 +372,68 @@ def verificar_regras_refeicao(nome, tipo_refeicao):
         if hora_atual < 20:
             return False, "Fora do horário (20h às 00h)"
 
+    # Checagem na fila local primeiro: pega duplicidade registrada offline.
+    for lote in carregar_fila() + st.session_state.get("fila_memoria", []):
+        for linha in lote.get("linhas") or []:
+            if (
+                linha.get("colaborador") == nome
+                and linha.get("data") == data_hoje
+                and linha.get("tipo") == tipo_refeicao
+            ):
+                return False, f"Bloqueado: {tipo_refeicao} já consumido hoje."
+
     try:
-        res = (
-            supabase.table("registros")
+        res = executar_com_retry(
+            lambda: supabase.table("registros")
             .select("id")
             .eq("colaborador", nome)
             .eq("data", data_hoje)
             .eq("tipo", tipo_refeicao)
             .limit(1)
-            .execute()
+            .execute(),
+            tentativas=2,
         )
         if res.data:
             return False, f"Bloqueado: {tipo_refeicao} já consumido hoje."
-    except:
+    except Exception:
+        # Banco indisponível: libera o registro (vai para a fila) para não
+        # travar o atendimento no refeitório.
         pass
     return True, ""
 
 def inserir_registros(nome, item, lista_final):
-    """Insere registros no Supabase e retorna o código de auditoria."""
+    """Grava o registro e devolve (codigo_auditoria, enviado_ao_banco).
+
+    O lote inteiro vai em UMA única chamada: ou grava tudo, ou nada — acaba
+    com o registro pela metade quando o banco cai no meio do laço.
+    Se o banco não responder, o lote vai para a fila local e é reenviado
+    automaticamente na próxima vez que o banco estiver de pé.
+    """
     cod = str(uuid.uuid4())[:8].upper()
     agora_mt = hora_local()
     dt = agora_mt.strftime("%d/%m/%Y")
     hr = agora_mt.strftime("%H:%M:%S")
 
-    for lit in lista_final:
-        supabase.table("registros").insert({
+    linhas = [
+        {
             "data": dt,
             "hora": hr,
             "colaborador": nome,
             "tipo": item,
             "litros": lit,
             "codigo_auditoria": cod,
-        }).execute()
-    return cod
+        }
+        for lit in lista_final
+    ]
+
+    try:
+        executar_com_retry(
+            lambda: supabase.table("registros").insert(linhas).execute()
+        )
+        return cod, True
+    except Exception:
+        enfileirar_lote(linhas, cod)
+        return cod, False
 
 def gerar_excel(df_exibir, d_inicio, d_fim):
     """Gera Excel com aba de resumo e aba de detalhes."""
@@ -230,10 +462,25 @@ defaults = {
     "mostrar_sucesso": False,
     "ultimo_nome": None,
     "tentativas_senha": 0,
+    "fila_memoria": [],
+    "banco_online": True,
+    "ultimo_codigo": None,
+    "ultimo_registro_offline": False,
 }
 for key, val in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = val
+
+# ==========================================
+# 8.5 SINCRONIZAÇÃO AUTOMÁTICA DA FILA
+# ==========================================
+# A cada execução, se houver registros pendentes, tenta subir. É assim que os
+# registros feitos enquanto o Supabase dormia entram no banco sozinhos.
+if total_pendentes() > 0 and supabase is not None:
+    enviados, restantes = reenviar_pendentes()
+    if enviados:
+        buscar_todos_colaboradores.clear()
+        st.toast(f"☁️ {enviados} registro(s) pendente(s) enviado(s) ao banco.")
 
 # ==========================================
 # 9. TIMEOUT AUTOMÁTICO
@@ -270,7 +517,20 @@ if senha_admin_ok:
     st.title("📊 Portal Administrativo — Medição")
     st.markdown("---")
 
-    aba_dados, aba_colaboradores = st.tabs(["📈 Registros e Relatórios", "👥 Gestão de Colaboradores"])
+    # --- Status do banco e da fila ---
+    pendentes_admin = total_pendentes()
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        if banco_disponivel():
+            st.success("🟢 Banco de dados: **online**")
+        else:
+            st.error("🔴 Banco de dados: **sem resposta** (pode estar em repouso)")
+    with col_s2:
+        st.metric("Registros aguardando envio", pendentes_admin)
+
+    aba_dados, aba_colaboradores, aba_pendentes = st.tabs(
+        ["📈 Registros e Relatórios", "👥 Gestão de Colaboradores", "☁️ Pendências"]
+    )
 
     # --- ABA 1: REGISTROS ---
     with aba_dados:
@@ -293,8 +553,8 @@ if senha_admin_ok:
                     for i in range(delta + 1)
                 ]
 
-                res_adm = (
-                    supabase.table("registros")
+                res_adm = executar_com_retry(
+                    lambda: supabase.table("registros")
                     .select("*")
                     .in_("data", datas_periodo)
                     .execute()
@@ -391,10 +651,12 @@ if senha_admin_ok:
                 st.error("Selecione o colaborador e digite a nova senha.")
             else:
                 try:
-                    supabase.table("colaboradores").update(
-                        {"senha": hash_senha(nova_senha)}
-                    ).eq("nome", colab_reset).execute()
-                    buscar_dados_colaboradores.clear()
+                    executar_com_retry(
+                        lambda: supabase.table("colaboradores").update(
+                            {"senha": hash_senha(nova_senha)}
+                        ).eq("nome", colab_reset).execute()
+                    )
+                    _buscar_colaboradores_online.clear()
                     buscar_todos_colaboradores.clear()
                     st.success(f"✅ Senha de **{colab_reset}** resetada com sucesso.")
                 except Exception as e:
@@ -416,14 +678,54 @@ if senha_admin_ok:
             else:
                 try:
                     novo_status = acao_ativo == "Ativar"
-                    supabase.table("colaboradores").update(
-                        {"ativo": novo_status}
-                    ).eq("nome", colab_ativar).execute()
-                    buscar_dados_colaboradores.clear()
+                    executar_com_retry(
+                        lambda: supabase.table("colaboradores").update(
+                            {"ativo": novo_status}
+                        ).eq("nome", colab_ativar).execute()
+                    )
+                    _buscar_colaboradores_online.clear()
                     buscar_todos_colaboradores.clear()
                     st.success(f"✅ Colaborador **{colab_ativar}** {'ativado' if novo_status else 'desativado'}.")
                 except Exception as e:
                     st.error(f"Erro: {e}")
+
+    # --- ABA 3: PENDÊNCIAS (fila local) ---
+    with aba_pendentes:
+        st.subheader("☁️ Registros aguardando envio ao banco")
+        st.caption(
+            "Registros feitos enquanto o Supabase estava em repouso ficam salvos aqui "
+            "e sobem automaticamente. Nada é perdido."
+        )
+
+        fila_atual = carregar_fila()
+        if not fila_atual:
+            st.success("✅ Nenhuma pendência. Tudo sincronizado com o banco.")
+        else:
+            linhas_fila = [
+                {**linha, "lote": lote.get("codigo_auditoria"), "enfileirado_em": lote.get("criado_em")}
+                for lote in fila_atual
+                for linha in (lote.get("linhas") or [])
+            ]
+            st.dataframe(pd.DataFrame(linhas_fila), use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "📥 BAIXAR CÓPIA DE SEGURANÇA (JSON)",
+                data=json.dumps(fila_atual, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name=f"pendentes_{hora_local().strftime('%d_%m_%Y_%H%M')}.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
+        if st.button("🔄 TENTAR ENVIAR AGORA", use_container_width=True, type="primary"):
+            with st.spinner("Acordando o banco e enviando..."):
+                enviados, restantes = reenviar_pendentes()
+            if enviados:
+                st.success(f"✅ {enviados} lote(s) enviado(s). Restam {restantes}.")
+            elif restantes:
+                st.error("❌ O banco ainda não respondeu. Os registros continuam salvos aqui.")
+            else:
+                st.info("Nada para enviar.")
+            st.rerun()
 
 # ==========================================
 # TELA 2: TOTEM DIGITAL (COLABORADORES)
@@ -440,13 +742,45 @@ elif not MODO_ADMIN_URL:
 
     # --- FEEDBACK PÓS-REGISTRO ---
     if st.session_state.mostrar_sucesso:
-        st.success("✅ Registro concluído com sucesso! O Totem está pronto para o próximo colaborador.")
-        st.balloons()
+        cod = st.session_state.get("ultimo_codigo")
+        if st.session_state.get("ultimo_registro_offline"):
+            st.warning(
+                "✅ Registro **salvo com segurança**! O banco de dados está acordando "
+                "e o envio será concluído automaticamente em instantes. "
+                + (f"\n\nCódigo de auditoria: **{cod}**" if cod else "")
+            )
+        else:
+            st.success("✅ Registro concluído com sucesso! O Totem está pronto para o próximo colaborador.")
+            st.balloons()
         st.session_state.mostrar_sucesso = False
+        st.session_state.ultimo_registro_offline = False
+        st.session_state.ultimo_codigo = None
         time.sleep(3)
         st.rerun()
 
+    # --- STATUS DO BANCO / PENDÊNCIAS ---
+    pendentes = total_pendentes()
+    if pendentes > 0:
+        st.info(
+            f"☁️ {pendentes} registro(s) aguardando envio ao banco. "
+            "Eles estão salvos e sobem sozinhos assim que a conexão voltar — "
+            "**não repita o registro**."
+        )
+
     dados_usuarios = buscar_dados_colaboradores()
+
+    if not st.session_state.get("banco_online", True):
+        if dados_usuarios:
+            st.warning(
+                "⚠️ O banco de dados está acordando. O totem continua funcionando "
+                "normalmente — seus registros ficam salvos e sobem automaticamente."
+            )
+        else:
+            st.error(
+                "🔴 Banco de dados indisponível e sem lista de colaboradores salva "
+                "neste aparelho. Aguarde 2 minutos e recarregue a página."
+            )
+
     nomes_lista = sorted([u["nome"] for u in dados_usuarios])
     nome_selecionado = st.selectbox(
         "IDENTIFIQUE-SE:",
@@ -484,18 +818,25 @@ elif not MODO_ADMIN_URL:
                 st.warning("⚠️ Este nome já está cadastrado.")
             else:
                 try:
-                    supabase.table("colaboradores").insert({
-                        "nome": n_nome,
-                        "empresa": n_empresa,
-                        "senha": hash_senha(n_senha),
-                        "ativo": True,
-                    }).execute()
-                    buscar_dados_colaboradores.clear()
+                    with st.spinner("Salvando cadastro..."):
+                        executar_com_retry(
+                            lambda: supabase.table("colaboradores").insert({
+                                "nome": n_nome,
+                                "empresa": n_empresa,
+                                "senha": hash_senha(n_senha),
+                                "ativo": True,
+                            }).execute()
+                        )
+                    _buscar_colaboradores_online.clear()
                     st.session_state.mostrar_sucesso = True
                     st.session_state.chave_identificacao = str(uuid.uuid4())
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Erro ao salvar: {e}")
+                    st.error(
+                        "❌ Não foi possível salvar o cadastro agora — o banco de dados "
+                        "não respondeu (pode estar acordando). Aguarde 1 minuto e tente "
+                        f"novamente.\n\nDetalhe técnico: {e}"
+                    )
 
     # --- FLUXO 2: AUTENTICAÇÃO E REGISTRO ---
     elif nome_selecionado:
@@ -656,13 +997,13 @@ elif not MODO_ADMIN_URL:
                     elif not assinatura:
                         st.error("⚠️ Marque a caixinha de declaração antes de confirmar.")
                     else:
-                        try:
-                            inserir_registros(nome_selecionado, item, lista_final)
-                            st.session_state.mostrar_sucesso = True
-                            resetar_sessao()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Erro: {e}")
+                        with st.spinner("Registrando..."):
+                            cod, enviado = inserir_registros(nome_selecionado, item, lista_final)
+                        st.session_state.ultimo_codigo = cod
+                        st.session_state.ultimo_registro_offline = not enviado
+                        st.session_state.mostrar_sucesso = True
+                        resetar_sessao()
+                        st.rerun()
 
 elif MODO_ADMIN_URL and not senha_admin_ok:
     st.title("🔐 Portal Administrativo")
