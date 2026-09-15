@@ -82,6 +82,12 @@ AVISO_TIMEOUT_SEG = 30       # Aviso visual nos últimos 30 segundos
 MAX_TENTATIVAS_SENHA = 5     # Bloqueia após 5 erros de senha
 DATA_CORTE_FALLBACK = datetime(2025, 12, 31)  # Fallback texto puro encerra nesta data
 
+# --- Horários das refeições (hora local de Mato Grosso) ---
+ALMOCO_INICIO = 10          # Almoço: das 10h às 14h (mesmo dia)
+ALMOCO_FIM = 14
+JANTAR_INICIO = 22          # Jantar: das 22h às 02h (cruza a meia-noite)
+JANTAR_FIM = 2
+
 # --- Resiliência a banco em repouso / queda de rede ---
 TENTATIVAS_REDE = 4          # Tentativas por operação antes de desistir
 ESPERA_INICIAL_SEG = 1.5     # Backoff: 1.5s, 3s, 6s (total ~10s)
@@ -357,44 +363,66 @@ def hora_local() -> datetime:
     # Fallback sem pytz (UTC-4 fixo)
     return datetime.utcnow() - timedelta(hours=4)
 
+def datas_do_turno(tipo_refeicao, agora) -> list:
+    """Datas (dd/mm/aaaa) que compõem o turno atual da refeição.
+
+    O jantar vai das 22h às 02h, ou seja, atravessa a meia-noite: quem come
+    às 23h grava na data de hoje e quem come à 01h grava na data de amanhã.
+    Para a checagem de "já consumiu neste turno" as duas datas contam como
+    a mesma noite.
+    """
+    if tipo_refeicao != "JANTAR":
+        return [agora.strftime("%d/%m/%Y")]
+
+    # Antes das 2h ainda é a noite do dia anterior.
+    inicio = agora.date() - timedelta(days=1) if agora.hour < JANTAR_FIM else agora.date()
+    return [
+        inicio.strftime("%d/%m/%Y"),
+        (inicio + timedelta(days=1)).strftime("%d/%m/%Y"),
+    ]
+
+
 def verificar_regras_refeicao(nome, tipo_refeicao):
     if tipo_refeicao not in ["ALMOÇO", "JANTAR"]:
         return True, ""
 
     agora = hora_local()
     hora_atual = agora.hour
-    data_hoje = agora.strftime("%d/%m/%Y")
 
     if tipo_refeicao == "ALMOÇO":
-        if not (10 <= hora_atual < 14):
-            return False, "Fora do horário (10h às 14h)"
+        if not (ALMOCO_INICIO <= hora_atual < ALMOCO_FIM):
+            return False, f"Fora do horário ({ALMOCO_INICIO}h às {ALMOCO_FIM}h)"
     elif tipo_refeicao == "JANTAR":
-        if hora_atual < 20:
-            return False, "Fora do horário (20h às 00h)"
+        # Janela que cruza a meia-noite: vale das 22h em diante OU antes das 2h.
+        if not (hora_atual >= JANTAR_INICIO or hora_atual < JANTAR_FIM):
+            return False, f"Fora do horário ({JANTAR_INICIO}h às {JANTAR_FIM:02d}h)"
+
+    datas_turno = datas_do_turno(tipo_refeicao, agora)
+    bloqueio = f"Bloqueado: {tipo_refeicao} já consumido neste turno."
 
     # Checagem na fila local primeiro: pega duplicidade registrada offline.
     for lote in carregar_fila() + st.session_state.get("fila_memoria", []):
         for linha in lote.get("linhas") or []:
             if (
                 linha.get("colaborador") == nome
-                and linha.get("data") == data_hoje
+                and linha.get("data") in datas_turno
                 and linha.get("tipo") == tipo_refeicao
             ):
-                return False, f"Bloqueado: {tipo_refeicao} já consumido hoje."
+                return False, bloqueio
 
     try:
         res = executar_com_retry(
             lambda: supabase.table("registros")
             .select("id")
             .eq("colaborador", nome)
-            .eq("data", data_hoje)
+            .in_("data", datas_turno)
             .eq("tipo", tipo_refeicao)
             .limit(1)
             .execute(),
             tentativas=2,
         )
         if res.data:
-            return False, f"Bloqueado: {tipo_refeicao} já consumido hoje."
+            return False, bloqueio
     except Exception:
         # Banco indisponível: libera o registro (vai para a fila) para não
         # travar o atendimento no refeitório.
@@ -888,7 +916,8 @@ elif not MODO_ADMIN_URL:
 
                 st.caption(
                     f"⏰ Horário (MT): **{hora_local().strftime('%H:%M')}** "
-                    f"| 🍽️ Almoço: 10h–14h | 🌙 Jantar: 20h–00h"
+                    f"| 🍽️ Almoço: {ALMOCO_INICIO}h–{ALMOCO_FIM}h"
+                    f" | 🌙 Jantar: {JANTAR_INICIO}h–{JANTAR_FIM:02d}h"
                     f" | ⏱️ Sessão expira em {int(max(segundos_restantes(), 0) // 60)}min"
                 )
                 st.markdown("---")
