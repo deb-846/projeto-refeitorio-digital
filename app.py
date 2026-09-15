@@ -364,12 +364,11 @@ def hora_local() -> datetime:
     return datetime.utcnow() - timedelta(hours=4)
 
 def datas_do_turno(tipo_refeicao, agora) -> list:
-    """Datas (dd/mm/aaaa) que compõem o turno atual da refeição.
+    """Datas (dd/mm/aaaa) que o turno atual da refeição pode abranger.
 
     O jantar vai das 22h às 02h, ou seja, atravessa a meia-noite: quem come
     às 23h grava na data de hoje e quem come à 01h grava na data de amanhã.
-    Para a checagem de "já consumiu neste turno" as duas datas contam como
-    a mesma noite.
+    Para o jantar a lista tem duas datas: [noite de, madrugada seguinte].
     """
     if tipo_refeicao != "JANTAR":
         return [agora.strftime("%d/%m/%Y")]
@@ -380,6 +379,30 @@ def datas_do_turno(tipo_refeicao, agora) -> list:
         inicio.strftime("%d/%m/%Y"),
         (inicio + timedelta(days=1)).strftime("%d/%m/%Y"),
     ]
+
+
+def registro_no_turno(linha, tipo_refeicao, datas_turno) -> bool:
+    """Diz se um registro já gravado pertence ao turno em questão.
+
+    A data sozinha não basta para o jantar: noites vizinhas compartilham uma
+    data. A noite de 15 abrange 15/09 (a partir das 22h) e 16/09 (até as 2h);
+    a noite de 16 abrange 16/09 (a partir das 22h) e 17/09. Sem olhar a hora,
+    quem jantasse à 01h do dia 16 ficaria impedido de jantar às 22h do mesmo
+    dia 16 — duas noites distintas.
+    """
+    data = linha.get("data")
+    if data not in datas_turno:
+        return False
+    if tipo_refeicao != "JANTAR":
+        return True
+
+    hora = linha.get("hora") or ""
+    if not hora:
+        # Registro antigo, sem hora: conta como a noite da própria data.
+        return data == datas_turno[0]
+    if data == datas_turno[0]:
+        return hora >= f"{JANTAR_INICIO:02d}:00:00"   # noite: das 22h em diante
+    return hora < f"{JANTAR_FIM:02d}:00:00"            # madrugada: até as 2h
 
 
 def verificar_regras_refeicao(nome, tipo_refeicao):
@@ -405,23 +428,22 @@ def verificar_regras_refeicao(nome, tipo_refeicao):
         for linha in lote.get("linhas") or []:
             if (
                 linha.get("colaborador") == nome
-                and linha.get("data") in datas_turno
                 and linha.get("tipo") == tipo_refeicao
+                and registro_no_turno(linha, tipo_refeicao, datas_turno)
             ):
                 return False, bloqueio
 
     try:
         res = executar_com_retry(
             lambda: supabase.table("registros")
-            .select("id")
+            .select("data, hora")
             .eq("colaborador", nome)
             .in_("data", datas_turno)
             .eq("tipo", tipo_refeicao)
-            .limit(1)
             .execute(),
             tentativas=2,
         )
-        if res.data:
+        if any(registro_no_turno(l, tipo_refeicao, datas_turno) for l in (res.data or [])):
             return False, bloqueio
     except Exception:
         # Banco indisponível: libera o registro (vai para a fila) para não
