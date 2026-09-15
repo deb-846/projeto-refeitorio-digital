@@ -1,0 +1,9 @@
+# Fila local de registros pendentes e snapshot de colaboradores
+.dados_locais/
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets locais do Streamlit
+.streamlit/secrets.toml
