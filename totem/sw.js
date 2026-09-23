@@ -1,7 +1,7 @@
 // Service worker: guarda os arquivos do totem no aparelho para que ele abra
 // mesmo sem internet. Ao publicar uma versão nova, aumente VERSAO para o
 // tablet baixar os arquivos atualizados.
-var VERSAO = "totem-v1";
+var VERSAO = "totem-v2";
 var ARQUIVOS = [
   "./",
   "index.html",
@@ -30,18 +30,24 @@ self.addEventListener("activate", function (evento) {
   );
 });
 
-// Rede primeiro (pega atualizações quando há internet); sem rede, usa o cache.
+// Rede primeiro (pega atualizações quando há internet). Sem rede, ou se o
+// site responder com erro (fora do ar, removido), usa a cópia guardada: o
+// totem instalado continua abrindo mesmo que a hospedagem deixe de existir.
 self.addEventListener("fetch", function (evento) {
   if (evento.request.method !== "GET") return;
+  var mesmaOrigem = new URL(evento.request.url).origin === self.location.origin;
+  function doCache() { return caches.match(evento.request, { ignoreSearch: true }); }
   evento.respondWith(
     fetch(evento.request).then(function (resposta) {
-      if (resposta.ok && new URL(evento.request.url).origin === self.location.origin) {
+      if (!mesmaOrigem) return resposta;
+      if (resposta.ok) {
         var copia = resposta.clone();
         caches.open(VERSAO).then(function (cache) { cache.put(evento.request, copia); });
+        return resposta;
       }
-      return resposta;
+      return doCache().then(function (guardada) { return guardada || resposta; });
     }).catch(function () {
-      return caches.match(evento.request, { ignoreSearch: true });
+      return doCache().then(function (guardada) { return guardada || Response.error(); });
     })
   );
 });
