@@ -26,7 +26,7 @@ totem abre mesmo se a internet cair.
 1. **Publicar:** no GitHub, vá em *Settings › Pages › Build and deployment* e
    escolha **Source: GitHub Actions**. Depois, em *Actions › Publicar totem*,
    clique em *Run workflow*. O endereço será
-   `https://deborah-andrade846.github.io/projeto-refeitorio-digital/`.
+   `https://deb-846.github.io/projeto-refeitorio-digital/`.
 2. **No tablet:** abra esse endereço no Chrome (ou Edge) e use
    *menu › Adicionar à tela inicial / Instalar app*. Instalado, o totem abre
    em tela cheia e o navegador protege os dados contra limpeza automática.
@@ -39,6 +39,17 @@ totem abre mesmo se a internet cair.
 
 Para testar num computador sem publicar: dentro de `totem/`, rode
 `python3 -m http.server 8000` e abra `http://localhost:8000`.
+
+## Trocar o endereço do totem (mudança de conta ou de site)
+
+O navegador guarda os dados **por endereço**. Se o endereço do totem mudar
+(por exemplo, o repositório for transferido para outra conta do GitHub), o
+totem abre vazio no endereço novo. Para migrar sem perder nada:
+
+1. No endereço **antigo**: *Administração › Dados e Backup › Baixar backup*.
+2. No endereço **novo**: instale na tela inicial, crie a senha de admin e
+   importe esse backup.
+3. Só depois de conferir os dados no endereço novo, remova o ícone antigo.
 
 ## Rotina
 
