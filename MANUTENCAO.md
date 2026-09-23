@@ -79,7 +79,10 @@ Cloud esse disco é reiniciado quando o app é redeployado ou hiberna. Por isso:
 ## Checklist rápido quando "sumirem" registros
 
 1. Abra o totem com `?admin=1` e veja o indicador do banco.
-2. Se estiver 🔴, aguarde 2 minutos e recarregue — o ping acorda o projeto.
+2. Se estiver 🔴, aguarde 2 minutos e recarregue. Se continuar 🔴, abra
+   supabase.com/dashboard: se o projeto aparecer como **Paused/Inactive**,
+   clique em **Restore project** (leva alguns minutos). Um projeto pausado
+   **não volta sozinho** — nem com o ping, nem recarregando o totem.
 3. Confira a aba **☁️ Pendências**: os registros estão lá, não se perderam.
 4. Clique em **Tentar enviar agora**.
 5. Verifique se o workflow "Manter Supabase ativo" está habilitado e com os
