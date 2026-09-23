@@ -1,0 +1,201 @@
+:root {
+  --fundo: #f4f6f9;
+  --cartao: #ffffff;
+  --texto: #1d2733;
+  --suave: #5b6878;
+  --borda: #d5dbe3;
+  --primaria: #1f3a5f;
+  --primaria-texto: #ffffff;
+  --sucesso: #1e7b45;
+  --sucesso-fundo: #e3f4ea;
+  --alerta: #8a5a00;
+  --alerta-fundo: #fff4d6;
+  --erro: #a3262a;
+  --erro-fundo: #fde6e6;
+  --info-fundo: #e5eefb;
+  --barra: #3b6ea8;
+  --raio: 12px;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; }
+
+body {
+  background: var(--fundo);
+  color: var(--texto);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 18px;
+  line-height: 1.4;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  -webkit-tap-highlight-color: transparent;
+}
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 24px 16px 32px;
+}
+
+main.largo { max-width: 1100px; }
+
+h1 { font-size: 1.9rem; margin: 0 0 4px; }
+h2 { font-size: 1.35rem; margin: 24px 0 12px; }
+h3 { font-size: 1.1rem; margin: 20px 0 8px; }
+
+.subtitulo { color: var(--suave); margin: 0 0 20px; }
+.carregando { color: var(--suave); text-align: center; margin-top: 30vh; }
+
+.cartao {
+  background: var(--cartao);
+  border: 1px solid var(--borda);
+  border-radius: var(--raio);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+label { display: block; font-weight: 600; margin: 14px 0 6px; }
+
+input[type=text], input[type=password], input[type=number], input[type=date], select {
+  width: 100%;
+  min-height: 56px;
+  font-size: 1.1rem;
+  padding: 10px 14px;
+  border: 1px solid var(--borda);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--texto);
+}
+
+input:focus, select:focus, button:focus-visible {
+  outline: 3px solid #8fb4e3;
+  outline-offset: 1px;
+}
+
+button {
+  font: inherit;
+  font-weight: 600;
+  min-height: 56px;
+  padding: 10px 18px;
+  border-radius: 10px;
+  border: 1px solid var(--borda);
+  background: #fff;
+  color: var(--texto);
+  cursor: pointer;
+}
+
+button.primario { background: var(--primaria); color: var(--primaria-texto); border-color: var(--primaria); }
+button.perigo { color: var(--erro); border-color: var(--erro); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.largo { width: 100%; }
+button.pequeno { min-height: 44px; font-size: .95rem; padding: 6px 14px; }
+
+.linha { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.linha > * { flex: 1 1 0; min-width: 0; }
+.linha.fim { justify-content: space-between; }
+.linha.fim > * { flex: 0 0 auto; }
+
+.grade-itens {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.item {
+  min-height: 120px;
+  font-size: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.item .emoji { font-size: 2.4rem; line-height: 1; }
+.item .motivo { font-size: .8rem; font-weight: 400; color: var(--erro); }
+
+.grade-garrafas {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.contador {
+  border: 1px solid var(--borda);
+  border-radius: 10px;
+  padding: 10px;
+  text-align: center;
+  background: #fff;
+}
+.contador .rotulo { font-weight: 600; margin-bottom: 8px; }
+.contador .controles { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.contador .controles button { min-width: 56px; font-size: 1.5rem; padding: 0; }
+.contador .valor { font-size: 1.5rem; font-weight: 700; min-width: 2ch; }
+
+.declaracao {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-weight: 600;
+  margin: 20px 0;
+  padding: 14px;
+  border: 1px solid var(--borda);
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+}
+.declaracao input { width: 30px; height: 30px; flex: none; }
+
+.aviso { border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+.aviso.sucesso { background: var(--sucesso-fundo); color: var(--sucesso); }
+.aviso.alerta { background: var(--alerta-fundo); color: var(--alerta); }
+.aviso.erro { background: var(--erro-fundo); color: var(--erro); }
+.aviso.info { background: var(--info-fundo); color: var(--primaria); }
+
+.sucesso-grande { text-align: center; padding: 48px 16px; }
+.sucesso-grande .emoji { font-size: 4rem; }
+.sucesso-grande .codigo { font-family: ui-monospace, monospace; font-size: 1.3rem; letter-spacing: 2px; }
+
+.abas { display: flex; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid var(--borda); margin: 16px 0; }
+.abas button { border: none; border-bottom: 3px solid transparent; border-radius: 0; background: none; min-height: 48px; }
+.abas button.ativa { border-bottom-color: var(--primaria); color: var(--primaria); }
+
+.metricas { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.metrica { background: #fff; border: 1px solid var(--borda); border-radius: 10px; padding: 14px; }
+.metrica .rotulo { color: var(--suave); font-size: .9rem; }
+.metrica .numero { font-size: 1.8rem; font-weight: 700; }
+
+.tabela-rolagem { overflow-x: auto; border: 1px solid var(--borda); border-radius: 10px; background: #fff; max-height: 460px; }
+table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--borda); white-space: nowrap; }
+th { background: #eef1f5; position: sticky; top: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.barras { display: grid; gap: 6px; }
+.barra-linha { display: grid; grid-template-columns: minmax(90px, 38%) 1fr auto; gap: 8px; align-items: center; font-size: .9rem; }
+.barra-linha .nome { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.barra-linha .trilho { background: #e8ecf1; border-radius: 4px; height: 14px; }
+.barra-linha .preenchido { background: var(--barra); border-radius: 4px; height: 14px; }
+
+.dica { color: var(--suave); font-size: .9rem; }
+
+footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  color: var(--suave);
+  font-size: .85rem;
+}
+footer a { color: var(--suave); }
+
+input[type=file] { font-size: 1rem; }
+
+@media (max-width: 520px) {
+  h1 { font-size: 1.5rem; }
+  .item { min-height: 100px; }
+}
