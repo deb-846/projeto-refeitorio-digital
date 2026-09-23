@@ -48,7 +48,7 @@ jobs:
               --max-time 60 \
               -H "apikey: ${SUPABASE_KEY}" \
               -H "Authorization: Bearer ${SUPABASE_KEY}" \
-              "$url" || echo "000")
+              "$url" || true)
 
             echo "Tentativa ${tentativa}: HTTP ${codigo}"
 
@@ -65,7 +65,7 @@ jobs:
             sleep $((tentativa * 20))
           done
 
-          echo "::error::Supabase não respondeu após 5 tentativas."
+          echo "::error::Supabase não respondeu após 5 tentativas. HTTP 000 = o endereço nem resolve, sinal de que o projeto está PAUSADO: restaure em supabase.com/dashboard (Restore project) — o ping não consegue acordar um projeto pausado."
           exit 1
 
       - name: Acordar o app do totem (opcional)

@@ -828,7 +828,9 @@ elif not MODO_ADMIN_URL:
         else:
             st.error(
                 "🔴 Banco de dados indisponível e sem lista de colaboradores salva "
-                "neste aparelho. Aguarde 2 minutos e recarregue a página."
+                "neste aparelho. Aguarde 2 minutos e recarregue a página. "
+                "Se o erro continuar, avise o responsável: o projeto no Supabase "
+                "pode estar pausado e precisa ser restaurado no painel."
             )
 
     nomes_lista = sorted([u["nome"] for u in dados_usuarios])
